@@ -4,10 +4,12 @@ package dnstun
 
 import (
 	"context"
+	"io"
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
+	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 )
 
@@ -15,22 +17,46 @@ type Options struct {
 	Host string
 }
 
-// DNSTun is a plugin to block DNS tunneling queries.
-type DNSTun struct {
+// Dnstun is a plugin to block DNS tunneling queries.
+type Dnstun struct {
+	opts     Options
+	conn     io.Closer
 	resolver ResolverClient
 }
 
-func NewDNSTun(opts Options) (*DNSTun, error) {
-	conn, err := grpc.Dial(opts.Host)
-	if err != nil {
-		return nil, err
-	}
-	return &DNSTun{
-		resolver: NewResolverClient(conn),
-	}, nil
+func NewDnstun(opts Options) *Dnstun {
+	return &Dnstun{opts: opts}
 }
 
-func (dt *DNSTun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+func (dt *Dnstun) Dial() error {
+	conn, err := grpc.Dial(dt.opts.Host)
+	if err != nil {
+		return plugin.Error(dt.Name(), errors.Wrapf(err, "failed to dial %q", dt.opts.Host))
+	}
+	dt.conn = conn
+	dt.resolver = NewResolverClient(conn)
+	return nil
+}
+
+// Close closes connection to the DNS tunneling server.
+func (dt *Dnstun) Close() error {
+	err := dt.conn.Close()
+	if err != nil {
+		switch errors.Cause(err) {
+		case grpc.ErrClientConnClosing:
+			return nil
+		default:
+			return plugin.Error(dt.Name(), err)
+		}
+	}
+	return nil
+}
+
+func (dt *Dnstun) Name() string {
+	return "dnstun"
+}
+
+func (dt *Dnstun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	state := request.Request{W: w, Req: r}
 	req := ResolveRequest{Name: state.QName()}
 
@@ -54,20 +80,19 @@ func (dt *DNSTun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	return dns.RcodeSuccess, nil
 }
 
-type chainPlugin struct {
-	name     string
-	next     plugin.Handler
-	serveDNS func(context.Context, dns.ResponseWriter, *dns.Msg) (int, error)
+type chainHandler struct {
+	plugin.Handler
+	next plugin.Handler
 }
 
-// Name returns the name of the plugin. This method implements plugin.Handler
-// interface.
-func (p chainPlugin) Name() string {
-	return p.name
+func newChainHandler(h plugin.Handler) plugin.Plugin {
+	return func(next plugin.Handler) plugin.Handler {
+		return chainHandler{h, next}
+	}
 }
 
-func (p chainPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-	rcode, err := p.serveDNS(ctx, w, r)
+func (p chainHandler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+	rcode, err := p.Handler.ServeDNS(ctx, w, r)
 	if rcode != dns.RcodeSuccess {
 		return rcode, err
 	}
