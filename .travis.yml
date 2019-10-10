@@ -2,6 +2,9 @@
 # Configuration of the continuous integration server.
 language: go
 
+env:
+  - GO111MODULE=on
+
 go:
   - "1.12.x"
   - "1.13.x"
