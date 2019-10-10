@@ -2,6 +2,8 @@
 
 _dnstun_ - enable DNS tunneling detection in the service queries.
 
+[![Build Status][BuildStatus]](https://travis-ci.org/netrack/dnstun)
+
 ## Description
 
 With `dnstun` enabled, users are able to detect data exfiltration through DNS
@@ -33,3 +35,5 @@ Analyze all DNS queries through remote resolver listening on TCP socket.
     dnstun tcp://10.240.0.1:5678
 }
 ```
+
+[BuildStatus]: https://travis-ci.org/netrack/dnstun.svg?branch=master
