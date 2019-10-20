@@ -19,13 +19,14 @@ type Options struct {
 
 // Dnstun is a plugin to block DNS tunneling queries.
 type Dnstun struct {
-	opts     Options
-	conn     io.Closer
-	resolver ResolverClient
+	opts      Options
+	conn      io.Closer
+	resolver  ResolverClient
+	tokenizer Tokenizer
 }
 
 func NewDnstun(opts Options) *Dnstun {
-	return &Dnstun{opts: opts}
+	return &Dnstun{opts: opts, tokenizer: NewTokenizer(enUS, 256)}
 }
 
 func (dt *Dnstun) Dial() error {
@@ -58,6 +59,8 @@ func (dt *Dnstun) Name() string {
 
 func (dt *Dnstun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	state := request.Request{W: w, Req: r}
+
+	//seq := dt.tokenizer.TextToSeq(state.QName())
 	req := ResolveRequest{Name: state.QName()}
 
 	// When the remote resolver is not available, simply forward request
