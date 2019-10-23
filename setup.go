@@ -15,11 +15,6 @@ func setup(c *caddy.Controller) error {
 	}
 
 	p := NewDnstun(opts)
-
-	c.OnStartup(p.Dial)
-	c.OnRestart(p.Close)
-	c.OnFinalShutdown(p.Close)
-
 	dnsserver.GetConfig(c).AddPlugin(newChainHandler(p))
 	return nil
 }

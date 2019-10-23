@@ -29,8 +29,6 @@ func (t Tokenizer) TextToSeq(text string) []int {
 		numChars = t.maxChars
 	}
 
-	println(numChars)
-
 	seq := make([]int, t.maxChars)
 	for i := numChars - 1; i >= 0; i-- {
 		no := t.dict[runes[i]]

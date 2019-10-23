@@ -1,16 +1,39 @@
 package dnstun
 
-//go:generate protoc --proto_path=. --go_out=plugins=grpc:. resolver.proto
-
 import (
+	"bytes"
 	"context"
-	"io"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/url"
+	"time"
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
 	"github.com/pkg/errors"
-	"google.golang.org/grpc"
+)
+
+var (
+	// DefaultTransport is a default configuration of the Transport.
+	DefaultTransport http.RoundTripper = &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+			DualStack: true,
+		}).DialContext,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	// DefaultClient is a default instance of the HTTP client.
+	DefaultClient = &http.Client{
+		Transport: DefaultTransport,
+	}
 )
 
 type Options struct {
@@ -20,67 +43,120 @@ type Options struct {
 // Dnstun is a plugin to block DNS tunneling queries.
 type Dnstun struct {
 	opts      Options
-	conn      io.Closer
-	resolver  ResolverClient
+	client    *http.Client
 	tokenizer Tokenizer
 }
 
+// NewDnstun creates a new instance of the DNS tunneling detector plugin.
 func NewDnstun(opts Options) *Dnstun {
-	return &Dnstun{opts: opts, tokenizer: NewTokenizer(enUS, 256)}
-}
-
-func (dt *Dnstun) Dial() error {
-	conn, err := grpc.Dial(dt.opts.Host)
-	if err != nil {
-		return plugin.Error(dt.Name(), errors.Wrapf(err, "failed to dial %q", dt.opts.Host))
+	return &Dnstun{
+		opts:      opts,
+		client:    DefaultClient,
+		tokenizer: NewTokenizer(enUS, 256),
 	}
-	dt.conn = conn
-	dt.resolver = NewResolverClient(conn)
-	return nil
 }
 
-// Close closes connection to the DNS tunneling server.
-func (dt *Dnstun) Close() error {
-	err := dt.conn.Close()
-	if err != nil {
-		switch errors.Cause(err) {
-		case grpc.ErrClientConnClosing:
-			return nil
-		default:
-			return plugin.Error(dt.Name(), err)
-		}
-	}
-	return nil
-}
-
-func (dt *Dnstun) Name() string {
+func (d *Dnstun) Name() string {
 	return "dnstun"
 }
 
-func (dt *Dnstun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-	state := request.Request{W: w, Req: r}
+func (d *Dnstun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+	var (
+		state = request.Request{W: w, Req: r}
+		resp  PredictResponse
+	)
 
-	//seq := dt.tokenizer.TextToSeq(state.QName())
-	req := ResolveRequest{Name: state.QName()}
-
-	// When the remote resolver is not available, simply forward request
-	// processing to the next handler as there is no error.
-	resp, err := dt.resolver.Resolve(ctx, &req)
-	if err != nil {
-		return dns.RcodeSuccess, nil
+	req := PredictRequest{
+		X: [][]int{d.tokenizer.TextToSeq(state.QName())},
 	}
 
-	switch resp.Action {
-	case Action_REJECT:
+	u := url.URL{Scheme: "http", Host: d.opts.Host, Path: "/predict"}
+	err := d.do(ctx, "POST", &u, req, &resp)
+	if err != nil {
+		return dns.RcodeServerFailure, plugin.Error(d.Name(), err)
+	}
+
+	if len(resp.Y) != 1 || len(resp.Y[0]) == 0 {
+		err = errors.Errorf("invalid predict response: %#v", resp)
+		return dns.RcodeServerFailure, plugin.Error(d.Name(), err)
+	}
+
+	// Select max argument position from the response vector.
+	var (
+		yPos int     = 0
+		yMax float64 = resp.Y[0][yPos]
+	)
+	for i := yPos + 1; i < len(resp.Y[0]); i++ {
+		if resp.Y[0][i] > yMax {
+			yPos = i
+			yMax = resp.Y[0][i]
+		}
+	}
+
+	// The first position of the prediction vector corresponds to the DNS
+	// tunneling class, therefore such requests should be rejected.
+	if yPos == 0 {
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeRefused)
 		w.WriteMsg(m)
-
 		return dns.RcodeRefused, nil
 	}
 
-	// Pass the control to the next plugin.
+	// Pass control to the next plugin.
 	return dns.RcodeSuccess, nil
+}
+
+// PredictRequest is a request to get predictions for the given attribute vectors.
+type PredictRequest struct {
+	X [][]int `json:"x"`
+}
+
+// PredictResponse lists probabilities for each attribute vector.
+type PredictResponse struct {
+	Y [][]float64 `json:"y"`
+}
+
+func (d *Dnstun) do(ctx context.Context, method string, u *url.URL, in, out interface{}) error {
+	var (
+		b   []byte
+		err error
+	)
+
+	if in != nil {
+		b, err = json.Marshal(in)
+		if err != nil {
+			return errors.Wrapf(err, "failed to encode request")
+		}
+	}
+	req, err := http.NewRequest(method, u.String(), bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	resp, err := d.client.Do(req.WithContext(ctx))
+	if err != nil {
+		return err
+	}
+
+	// Decode the list of nodes from the body of the response.
+	defer resp.Body.Close()
+
+	// If server returned non-zero status, the response body is treated
+	// as a error message, which will be returned to the user.
+	if resp.StatusCode != http.StatusOK {
+		// Server could return a response error within a header.
+		errorCode := resp.Header.Get(http.CanonicalHeaderKey("Error-Code"))
+		if errorCode != "" {
+			return errors.New(errorCode)
+		}
+		return errors.Errorf("unexpected response from server: %d", resp.StatusCode)
+	}
+
+	if out == nil {
+		return nil
+	}
+
+	decoder := json.NewDecoder(resp.Body)
+	return errors.Wrapf(decoder.Decode(out), "failed to decode response")
 }
 
 type chainHandler struct {

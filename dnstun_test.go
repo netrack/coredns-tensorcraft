@@ -2,25 +2,29 @@ package dnstun
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	plugintest "github.com/coredns/coredns/plugin/test"
 	"github.com/miekg/dns"
-	"google.golang.org/grpc"
 )
 
-type TestResolver struct {
-	name string
-	resp *ResolveResponse
+type TestPredictor struct {
+	resp PredictResponse
 	err  error
 }
 
-func (r TestResolver) Resolve(
-	ctx context.Context, in *ResolveRequest, opts ...grpc.CallOption,
-) (*ResolveResponse, error) {
-	r.name = in.Name
-	return r.resp, r.err
+func (p *TestPredictor) Handle(w http.ResponseWriter, r *http.Request) {
+	b, err := json.Marshal(p.resp)
+	if err != nil || p.err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Write(b)
 }
 
 type TestResponseWriter struct {
@@ -35,17 +39,22 @@ func (rw *TestResponseWriter) WriteMsg(m *dns.Msg) error {
 
 func TestDnstunServeDNS(t *testing.T) {
 	tests := []struct {
-		resolver TestResolver
-		rcode    int
+		predictor TestPredictor
+		rcode     int
+		err       bool
 	}{
-		{TestResolver{resp: &ResolveResponse{Action: Action_REJECT}}, dns.RcodeRefused},
-		{TestResolver{resp: &ResolveResponse{Action: Action_ACCEPT}}, dns.RcodeSuccess},
-		{TestResolver{err: errors.New("err")}, dns.RcodeSuccess},
+		{TestPredictor{resp: PredictResponse{Y: [][]float64{{1.0, 0.2}}}}, dns.RcodeRefused, false},
+		{TestPredictor{resp: PredictResponse{Y: [][]float64{{0.1, 0.7}}}}, dns.RcodeSuccess, false},
+		{TestPredictor{err: errors.New("err")}, dns.RcodeServerFailure, true},
 	}
 
 	for _, tt := range tests {
 		t.Run("", func(t *testing.T) {
-			d := Dnstun{resolver: tt.resolver}
+			s := httptest.NewServer(http.HandlerFunc(tt.predictor.Handle))
+			defer s.Close()
+			defer s.CloseClientConnections()
+
+			d := NewDnstun(Options{Host: strings.TrimLeft(s.URL, "http://")})
 			req := plugintest.Case{Qname: "tunnel.example.org", Qtype: dns.TypeCNAME}
 
 			rw := new(TestResponseWriter)
@@ -53,14 +62,14 @@ func TestDnstunServeDNS(t *testing.T) {
 			if rcode != tt.rcode {
 				t.Errorf("rcode is wrong: %v != %v", rcode, tt.rcode)
 			}
-			if err != nil {
+			if err != nil && !tt.err {
 				t.Errorf("error returned: %v", err)
 			}
 
-			if tt.rcode != dns.RcodeSuccess && rw.m == nil {
+			if tt.rcode == dns.RcodeRefused && rw.m == nil {
 				t.Fatalf("message is not written")
 			}
-			if tt.rcode != dns.RcodeSuccess && rw.m.Rcode != tt.rcode {
+			if tt.rcode == dns.RcodeRefused && rw.m.Rcode != tt.rcode {
 				t.Errorf("wrong rcode in response %v != %v", rw.m.Rcode, tt.rcode)
 			}
 		})

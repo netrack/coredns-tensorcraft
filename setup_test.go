@@ -11,8 +11,8 @@ func TestParseConfig(t *testing.T) {
 		input string
 		want  Options
 	}{
-		{`dnstun tcp://localhost:4545`, Options{"tcp://localhost:4545"}},
-		{`dnstun unix:///var/run/dnstun.sock`, Options{"unix:///var/run/dnstun.sock"}},
+		{`dnstun http://localhost:4545`, Options{"http://localhost:4545"}},
+		{`dnstun http://1.1.1.1:2345`, Options{"http://1.1.1.1:2345"}},
 	}
 
 	for _, tt := range tests {
