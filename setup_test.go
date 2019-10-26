@@ -11,8 +11,14 @@ func TestParseConfig(t *testing.T) {
 		input string
 		want  Options
 	}{
-		{`dnstun http://localhost:4545`, Options{"http://localhost:4545"}},
-		{`dnstun http://1.1.1.1:2345`, Options{"http://1.1.1.1:2345"}},
+		{`dnstun {
+			runtime localhost:4545
+			detector reverse dns_cnn:latest
+		}`, Options{"reverse", "dns_cnn", "latest", "localhost:4545"}},
+		{`dnstun {
+			runtime 1.1.1.1:2345
+			detector forward sequential_1:0.0.0+build1
+		}`, Options{"forward", "sequential_1", "0.0.0+build1", "1.1.1.1:2345"}},
 	}
 
 	for _, tt := range tests {

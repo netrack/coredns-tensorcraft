@@ -54,7 +54,11 @@ func TestDnstunServeDNS(t *testing.T) {
 			defer s.Close()
 			defer s.CloseClientConnections()
 
-			d := NewDnstun(Options{Host: strings.TrimLeft(s.URL, "http://")})
+			d := NewDnstun(Options{
+				Mapping: MappingReverse,
+				Runtime: strings.TrimLeft(s.URL, "http://"),
+			})
+
 			req := plugintest.Case{Qname: "tunnel.example.org", Qtype: dns.TypeCNAME}
 
 			rw := new(TestResponseWriter)

@@ -1,0 +1,10 @@
+. {
+    dnstun {
+        runtime 127.0.0.1:5678
+        detector reverse dns_cnn:latest
+    }
+    forward . 8.8.8.8
+
+    log
+    errors
+}

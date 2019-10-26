@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"time"
 
 	"github.com/coredns/coredns/plugin"
@@ -36,8 +37,28 @@ var (
 	}
 )
 
+const (
+	// MappingForward means that first element in the prediction tuple
+	// is a probability of associating DNS query to the "good" domain
+	// names. The second element is a probability of "bad" domain.
+	MappingForward = "forward"
+
+	// MappingReverse is reversed representation of probabilities in
+	// the prediction tuple returned by the model.
+	MappingReverse = "reverse"
+)
+
+// mappings lists all available mapping types.
+var mappings = map[string]struct{}{
+	MappingForward: struct{}{},
+	MappingReverse: struct{}{},
+}
+
 type Options struct {
-	Host string
+	Mapping string
+	Model   string
+	Version string
+	Runtime string
 }
 
 // Dnstun is a plugin to block DNS tunneling queries.
@@ -70,7 +91,9 @@ func (d *Dnstun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 		X: [][]int{d.tokenizer.TextToSeq(state.QName())},
 	}
 
-	u := url.URL{Scheme: "http", Host: d.opts.Host, Path: "/predict"}
+	p := path.Join("/models", d.opts.Model, d.opts.Version, "predict")
+
+	u := url.URL{Scheme: "http", Host: d.opts.Runtime, Path: p}
 	err := d.do(ctx, "POST", &u, req, &resp)
 	if err != nil {
 		return dns.RcodeServerFailure, plugin.Error(d.Name(), err)
@@ -95,7 +118,9 @@ func (d *Dnstun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 
 	// The first position of the prediction vector corresponds to the DNS
 	// tunneling class, therefore such requests should be rejected.
-	if yPos == 0 {
+	if (d.opts.Mapping == MappingForward && yPos == 1) ||
+		(d.opts.Mapping == MappingReverse && yPos == 0) {
+
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeRefused)
 		w.WriteMsg(m)
