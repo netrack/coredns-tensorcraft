@@ -12,13 +12,11 @@ func TestParseConfig(t *testing.T) {
 		want  Options
 	}{
 		{`dnstun {
-			runtime localhost:4545
-			detector reverse dns_cnn:latest
-		}`, Options{"reverse", "dns_cnn", "latest", "localhost:4545"}},
+			graph dns-cnn.onnx
+		}`, Options{Graph: "dns-cnn.onnx"}},
 		{`dnstun {
-			runtime 1.1.1.1:2345
-			detector forward sequential_1:0.0.0+build1
-		}`, Options{"forward", "sequential_1", "0.0.0+build1", "1.1.1.1:2345"}},
+			graph sequential_1:0.0.0+build1
+		}`, Options{Graph: "sequential_1:0.0.0+build1"}},
 	}
 
 	for _, tt := range tests {

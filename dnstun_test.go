@@ -2,30 +2,11 @@ package dnstun
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	plugintest "github.com/coredns/coredns/plugin/test"
 	"github.com/miekg/dns"
 )
-
-type TestPredictor struct {
-	resp PredictResponse
-	err  error
-}
-
-func (p *TestPredictor) Handle(w http.ResponseWriter, r *http.Request) {
-	b, err := json.Marshal(p.resp)
-	if err != nil || p.err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	w.Write(b)
-}
 
 type TestResponseWriter struct {
 	plugintest.ResponseWriter
@@ -39,27 +20,27 @@ func (rw *TestResponseWriter) WriteMsg(m *dns.Msg) error {
 
 func TestDnstunServeDNS(t *testing.T) {
 	tests := []struct {
-		predictor TestPredictor
-		rcode     int
-		err       bool
+		qname string
+		rcode int
+		err   bool
 	}{
-		{TestPredictor{resp: PredictResponse{Y: [][]float64{{1.0, 0.2}}}}, dns.RcodeRefused, false},
-		{TestPredictor{resp: PredictResponse{Y: [][]float64{{0.1, 0.7}}}}, dns.RcodeSuccess, false},
-		{TestPredictor{err: errors.New("err")}, dns.RcodeServerFailure, true},
+		{"tunnel.example.org", dns.RcodeSuccess, false},
+		{"r17788.tunnel.tuns.org", dns.RcodeRefused, false},
 	}
 
 	for _, tt := range tests {
 		t.Run("", func(t *testing.T) {
-			s := httptest.NewServer(http.HandlerFunc(tt.predictor.Handle))
-			defer s.Close()
-			defer s.CloseClientConnections()
-
-			d := NewDnstun(Options{
-				Mapping: MappingReverse,
-				Runtime: strings.TrimLeft(s.URL, "http://"),
+			d, err := NewDnstun(Options{
+				Input:  "sent_input_2",
+				Output: "dense_18_2/Softmax",
+				Graph:  "dnscnn.pb",
 			})
 
-			req := plugintest.Case{Qname: "tunnel.example.org", Qtype: dns.TypeCNAME}
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+
+			req := plugintest.Case{Qname: tt.qname, Qtype: dns.TypeCNAME}
 
 			rw := new(TestResponseWriter)
 			rcode, err := d.ServeDNS(context.TODO(), rw, req.Msg())
