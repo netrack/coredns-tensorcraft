@@ -21,6 +21,10 @@ func NewTokenizer(alphabet string, maxChars int) Tokenizer {
 	return Tokenizer{dict, maxChars}
 }
 
+func (t Tokenizer) Shape() []int64 {
+	return []int64{1, int64(t.maxChars)}
+}
+
 func (t Tokenizer) TextToSeq(text string) []int64 {
 	runes := ([]rune)(strings.ToLower(text))
 
