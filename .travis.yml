@@ -4,6 +4,11 @@ language: go
 
 env:
   - GO111MODULE=on
+  - TENSORFLOW_SRC=https://storage.googleapis.com/tensorflow/libtensorflow/libtensorflow-cpu-linux-x86_64-1.15.0.tar.gz
+
+before_install:
+  - curl -fsSL $TENSORFLOW_SRC | sudo tar -C /usr/ -xzf -
+  - sudo ldconfig
 
 go:
   - "1.12.x"

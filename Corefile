@@ -1,7 +1,6 @@
 . {
     dnstun {
-        runtime 127.0.0.1:5678
-        detector reverse dns_cnn:latest
+        graph /var/dnstun/dnscnn.pb
     }
     forward . 8.8.8.8
 
