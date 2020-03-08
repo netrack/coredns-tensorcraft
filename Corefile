@@ -1,7 +1,7 @@
 . {
     dnstun {
-        runtime 127.0.0.1:5678
-        detector reverse dns_cnn:latest
+        runtime 127.0.0.1:8501
+        detector reverse dnscnn:1
     }
     forward . 8.8.8.8
 

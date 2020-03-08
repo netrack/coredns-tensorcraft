@@ -43,8 +43,8 @@ func TestDnstunServeDNS(t *testing.T) {
 		rcode     int
 		err       bool
 	}{
-		{TestPredictor{resp: PredictResponse{Y: [][]float64{{1.0, 0.2}}}}, dns.RcodeRefused, false},
-		{TestPredictor{resp: PredictResponse{Y: [][]float64{{0.1, 0.7}}}}, dns.RcodeSuccess, false},
+		{TestPredictor{resp: PredictResponse{Predictions: [][]float64{{1.0, 0.2}}}}, dns.RcodeRefused, false},
+		{TestPredictor{resp: PredictResponse{Predictions: [][]float64{{0.1, 0.7}}}}, dns.RcodeSuccess, false},
 		{TestPredictor{err: errors.New("err")}, dns.RcodeServerFailure, true},
 	}
 

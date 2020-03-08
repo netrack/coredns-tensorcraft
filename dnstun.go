@@ -88,18 +88,18 @@ func (d *Dnstun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 	)
 
 	req := PredictRequest{
-		X: [][]int{d.tokenizer.TextToSeq(state.QName())},
+		Instances: [][]int{d.tokenizer.TextToSeq(state.QName())},
 	}
 
-	p := path.Join("/models", d.opts.Model, d.opts.Version, "predict")
+	p := path.Join("/v1/models", d.opts.Model, "versions", d.opts.Version)
 
-	u := url.URL{Scheme: "http", Host: d.opts.Runtime, Path: p}
+	u := url.URL{Scheme: "http", Host: d.opts.Runtime, Path: p + ":predict"}
 	err := d.do(ctx, "POST", &u, req, &resp)
 	if err != nil {
 		return dns.RcodeServerFailure, plugin.Error(d.Name(), err)
 	}
 
-	if len(resp.Y) != 1 || len(resp.Y[0]) == 0 {
+	if len(resp.Predictions) != 1 || len(resp.Predictions[0]) == 0 {
 		err = errors.Errorf("invalid predict response: %#v", resp)
 		return dns.RcodeServerFailure, plugin.Error(d.Name(), err)
 	}
@@ -107,12 +107,12 @@ func (d *Dnstun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 	// Select max argument position from the response vector.
 	var (
 		yPos int     = 0
-		yMax float64 = resp.Y[0][yPos]
+		yMax float64 = resp.Predictions[0][yPos]
 	)
-	for i := yPos + 1; i < len(resp.Y[0]); i++ {
-		if resp.Y[0][i] > yMax {
+	for i := yPos + 1; i < len(resp.Predictions[0]); i++ {
+		if resp.Predictions[0][i] > yMax {
 			yPos = i
-			yMax = resp.Y[0][i]
+			yMax = resp.Predictions[0][i]
 		}
 	}
 
@@ -133,12 +133,12 @@ func (d *Dnstun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 
 // PredictRequest is a request to get predictions for the given attribute vectors.
 type PredictRequest struct {
-	X [][]int `json:"x"`
+	Instances [][]int `json:"instances"`
 }
 
 // PredictResponse lists probabilities for each attribute vector.
 type PredictResponse struct {
-	Y [][]float64 `json:"y"`
+	Predictions [][]float64 `json:"predictions"`
 }
 
 func (d *Dnstun) do(ctx context.Context, method string, u *url.URL, in, out interface{}) error {
