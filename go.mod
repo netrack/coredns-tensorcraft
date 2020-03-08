@@ -7,5 +7,4 @@ require (
 	github.com/coredns/coredns v1.6.4
 	github.com/miekg/dns v1.1.22
 	github.com/pkg/errors v0.8.1
-	github.com/tensorflow/tensorflow v2.1.0+incompatible
 )

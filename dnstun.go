@@ -1,34 +1,79 @@
 package dnstun
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/url"
+	"path"
+	"time"
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
 	"github.com/pkg/errors"
-
-	tf "github.com/tensorflow/tensorflow/tensorflow/go"
-	tfop "github.com/tensorflow/tensorflow/tensorflow/go/op"
 )
 
+var (
+	// DefaultTransport is a default configuration of the Transport.
+	DefaultTransport http.RoundTripper = &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+			DualStack: true,
+		}).DialContext,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	// DefaultClient is a default instance of the HTTP client.
+	DefaultClient = &http.Client{
+		Transport: DefaultTransport,
+	}
+)
+
+const (
+	// MappingForward means that first element in the prediction tuple
+	// is a probability of associating DNS query to the "good" domain
+	// names. The second element is a probability of "bad" domain.
+	MappingForward = "forward"
+
+	// MappingReverse is reversed representation of probabilities in
+	// the prediction tuple returned by the model.
+	MappingReverse = "reverse"
+)
+
+// mappings lists all available mapping types.
+var mappings = map[string]struct{}{
+	MappingForward: struct{}{},
+	MappingReverse: struct{}{},
+}
+
 type Options struct {
-	Graph string
+	Mapping string
+	Model   string
+	Version string
+	Runtime string
 }
 
 // Dnstun is a plugin to block DNS tunneling queries.
 type Dnstun struct {
-	predictGraph execGraph
-	argmaxGraph  execGraph
-	tokenizer    Tokenizer
+	opts      Options
+	client    *http.Client
+	tokenizer Tokenizer
 }
 
 // NewDnstun creates a new instance of the DNS tunneling detector plugin.
-func NewDnstun(predictGraph *tf.Graph) *Dnstun {
+func NewDnstun(opts Options) *Dnstun {
 	return &Dnstun{
-		predictGraph: newExecGraph(predictGraph),
-		argmaxGraph:  newExecGraph(newArgmax([]int64{1, 2}, tf.Float, 1)),
-		tokenizer:    NewTokenizer(enUS, 256),
+		opts:      opts,
+		client:    DefaultClient,
+		tokenizer: NewTokenizer(enUS, 256),
 	}
 }
 
@@ -36,49 +81,46 @@ func (d *Dnstun) Name() string {
 	return "dnstun"
 }
 
-func (d *Dnstun) predict(name string) (int64, error) {
-	input, err := tf.NewTensor([][]int64{d.tokenizer.TextToSeq(name)})
-	if err != nil {
-		return -1, err
-	}
-
-	output, err := d.predictGraph.Exec(input)
-	if err != nil {
-		return -1, err
-	}
-	if len(output) == 0 {
-		return -1, errors.New("prediction graph returned empty tensor")
-	}
-
-	// Select max argument position from the response vector.
-	output, err = d.argmaxGraph.Exec(output[0])
-	if err != nil {
-		return -1, err
-	}
-	if len(output) == 0 {
-		return -1, errors.New("argmax returned empty tensor")
-	}
-	index, ok := output[0].Value().([]int64)
-	if !ok {
-		return -1, errors.Errorf("unexpected output type %T", output[0].Value())
-	}
-	if len(index) == 0 {
-		return -1, errors.New("argmax return empty result")
-	}
-	return index[0], nil
-}
-
 func (d *Dnstun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-	state := request.Request{W: w, Req: r}
+	var (
+		state = request.Request{W: w, Req: r}
+		resp  PredictResponse
+	)
 
-	category, err := d.predict(state.QName())
+	req := PredictRequest{
+		X: [][]int{d.tokenizer.TextToSeq(state.QName())},
+	}
+
+	p := path.Join("/models", d.opts.Model, d.opts.Version, "predict")
+
+	u := url.URL{Scheme: "http", Host: d.opts.Runtime, Path: p}
+	err := d.do(ctx, "POST", &u, req, &resp)
 	if err != nil {
 		return dns.RcodeServerFailure, plugin.Error(d.Name(), err)
 	}
 
+	if len(resp.Y) != 1 || len(resp.Y[0]) == 0 {
+		err = errors.Errorf("invalid predict response: %#v", resp)
+		return dns.RcodeServerFailure, plugin.Error(d.Name(), err)
+	}
+
+	// Select max argument position from the response vector.
+	var (
+		yPos int     = 0
+		yMax float64 = resp.Y[0][yPos]
+	)
+	for i := yPos + 1; i < len(resp.Y[0]); i++ {
+		if resp.Y[0][i] > yMax {
+			yPos = i
+			yMax = resp.Y[0][i]
+		}
+	}
+
 	// The first position of the prediction vector corresponds to the DNS
 	// tunneling class, therefore such requests should be rejected.
-	if category == 0 {
+	if (d.opts.Mapping == MappingForward && yPos == 1) ||
+		(d.opts.Mapping == MappingReverse && yPos == 0) {
+
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeRefused)
 		w.WriteMsg(m)
@@ -87,6 +129,59 @@ func (d *Dnstun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 
 	// Pass control to the next plugin.
 	return dns.RcodeSuccess, nil
+}
+
+// PredictRequest is a request to get predictions for the given attribute vectors.
+type PredictRequest struct {
+	X [][]int `json:"x"`
+}
+
+// PredictResponse lists probabilities for each attribute vector.
+type PredictResponse struct {
+	Y [][]float64 `json:"y"`
+}
+
+func (d *Dnstun) do(ctx context.Context, method string, u *url.URL, in, out interface{}) error {
+	var (
+		b   []byte
+		err error
+	)
+
+	if in != nil {
+		b, err = json.Marshal(in)
+		if err != nil {
+			return errors.Wrapf(err, "failed to encode request")
+		}
+	}
+	req, err := http.NewRequest(method, u.String(), bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	resp, err := d.client.Do(req.WithContext(ctx))
+	if err != nil {
+		return err
+	}
+
+	// Decode the list of nodes from the body of the response.
+	defer resp.Body.Close()
+
+	// If server returned non-zero status, the response body is treated
+	// as a error message, which will be returned to the user.
+	if resp.StatusCode != http.StatusOK {
+		// Server could return a response error within a header.
+		errorCode := resp.Header.Get(http.CanonicalHeaderKey("Error-Code"))
+		if errorCode != "" {
+			return errors.New(errorCode)
+		}
+		return errors.Errorf("unexpected response from server: %d", resp.StatusCode)
+	}
+
+	if out == nil {
+		return nil
+	}
+
+	decoder := json.NewDecoder(resp.Body)
+	return errors.Wrapf(decoder.Decode(out), "failed to decode response")
 }
 
 type chainHandler struct {
@@ -108,71 +203,4 @@ func (p chainHandler) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns
 
 	state := request.Request{W: w, Req: r}
 	return plugin.NextOrFailure(state.Name(), p.next, ctx, w, r)
-}
-
-func newArgmax(shape []int64, dtype tf.DataType, dim int64) (graph *tf.Graph) {
-	inShape := tf.MakeShape(shape...)
-	root := tfop.NewScope()
-
-	input := tfop.Placeholder(root, dtype, tfop.PlaceholderShape(inShape))
-	tfop.ArgMax(root, input, tfop.Const(root, dim))
-
-	graph, err := root.Finalize()
-	if err != nil {
-		panic(err)
-	}
-	return graph
-}
-
-type execGraph struct {
-	graphInput  tf.Output
-	graphOutput tf.Output
-	graph       *tf.Graph
-}
-
-func newExecGraph(graph *tf.Graph) execGraph {
-	var (
-		ops   = graph.Operations()
-		input tf.Output
-	)
-
-	for _, o := range ops {
-		if o.Type() == "Placeholder" {
-			input = o.Output(0)
-			break
-		}
-	}
-
-	if input == (tf.Output{}) {
-		panic("graph without input")
-	}
-	return execGraph{
-		graphInput:  input,
-		graphOutput: ops[len(ops)-1].Output(0),
-		graph:       graph,
-	}
-}
-
-func (e execGraph) Exec(in *tf.Tensor) (output []*tf.Tensor, err error) {
-	sess, err := tf.NewSession(e.graph, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	defer func() {
-		e := sess.Close()
-		if e != nil {
-			if err != nil {
-				err = errors.WithMessage(err, e.Error())
-			} else {
-				err = e
-			}
-		}
-	}()
-
-	return sess.Run(
-		map[tf.Output]*tf.Tensor{e.graphInput: in},
-		[]tf.Output{e.graphOutput},
-		nil,
-	)
 }

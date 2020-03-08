@@ -2,14 +2,30 @@ package dnstun
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	plugintest "github.com/coredns/coredns/plugin/test"
 	"github.com/miekg/dns"
-
-	tf "github.com/tensorflow/tensorflow/tensorflow/go"
-	tfop "github.com/tensorflow/tensorflow/tensorflow/go/op"
 )
+
+type TestPredictor struct {
+	resp PredictResponse
+	err  error
+}
+
+func (p *TestPredictor) Handle(w http.ResponseWriter, r *http.Request) {
+	b, err := json.Marshal(p.resp)
+	if err != nil || p.err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Write(b)
+}
 
 type TestResponseWriter struct {
 	plugintest.ResponseWriter
@@ -21,43 +37,29 @@ func (rw *TestResponseWriter) WriteMsg(m *dns.Msg) error {
 	return rw.ResponseWriter.WriteMsg(m)
 }
 
-func newTestGraph(inputLen, outputLen int64, index int) *tf.Graph {
-	inShape := tf.MakeShape(1, inputLen)
-	root := tfop.NewScope()
-
-	matrix := make([][]float32, inputLen)
-	for i := range matrix {
-		matrix[i] = make([]float32, outputLen)
-		matrix[i][index] = 1
-	}
-
-	layer1 := tfop.Placeholder(root, tf.Int64, tfop.PlaceholderShape(inShape))
-	layer2 := tfop.Cast(root, layer1, tf.Float)
-	tfop.MatMul(root, layer2, tfop.Const(root, matrix))
-
-	graph, err := root.Finalize()
-	if err != nil {
-		panic(err)
-	}
-	return graph
-}
-
 func TestDnstunServeDNS(t *testing.T) {
 	tests := []struct {
-		index int
-		qname string
-		rcode int
-		err   bool
+		predictor TestPredictor
+		rcode     int
+		err       bool
 	}{
-		{1, "tunnel.example.org", dns.RcodeSuccess, false},
-		{0, "r17788.tunnel.tuns.org", dns.RcodeRefused, false},
+		{TestPredictor{resp: PredictResponse{Y: [][]float64{{1.0, 0.2}}}}, dns.RcodeRefused, false},
+		{TestPredictor{resp: PredictResponse{Y: [][]float64{{0.1, 0.7}}}}, dns.RcodeSuccess, false},
+		{TestPredictor{err: errors.New("err")}, dns.RcodeServerFailure, true},
 	}
 
 	for _, tt := range tests {
 		t.Run("", func(t *testing.T) {
-			d := NewDnstun(newTestGraph(256, 2, tt.index))
+			s := httptest.NewServer(http.HandlerFunc(tt.predictor.Handle))
+			defer s.Close()
+			defer s.CloseClientConnections()
 
-			req := plugintest.Case{Qname: tt.qname, Qtype: dns.TypeCNAME}
+			d := NewDnstun(Options{
+				Mapping: MappingReverse,
+				Runtime: strings.TrimLeft(s.URL, "http://"),
+			})
+
+			req := plugintest.Case{Qname: "tunnel.example.org", Qtype: dns.TypeCNAME}
 
 			rw := new(TestResponseWriter)
 			rcode, err := d.ServeDNS(context.TODO(), rw, req.Msg())
