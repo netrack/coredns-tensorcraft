@@ -1,8 +1,9 @@
 . {
     dnstun {
-        runtime 127.0.0.1:8501
-        detector reverse dnscnn:1
+        runtime  tensorflow.local:8501
+        detector dnscnn_saved_model:0001
     }
+
     forward . 8.8.8.8
 
     log

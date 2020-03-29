@@ -118,8 +118,8 @@ func (d *Dnstun) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 
 	// The first position of the prediction vector corresponds to the DNS
 	// tunneling class, therefore such requests should be rejected.
-	if (d.opts.Mapping == MappingForward && yPos == 1) ||
-		(d.opts.Mapping == MappingReverse && yPos == 0) {
+	if (d.opts.Mapping == MappingReverse && yPos == 1) ||
+		(d.opts.Mapping == MappingForward && yPos == 0) {
 
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeRefused)

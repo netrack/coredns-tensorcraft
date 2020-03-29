@@ -24,20 +24,26 @@ func setup(c *caddy.Controller) error {
 func parseOptions(c *caddy.Controller) (opts Options, err error) {
 	c.Next() // directive name
 
+	opts.Mapping = MappingForward
+
 	for c.NextBlock() {
 		switch c.Val() {
 		case "runtime":
 			if !c.Args(&opts.Runtime) {
 				return opts, c.ArgErr()
 			}
-		case "detector":
-			var mapping, detector string
-			if !c.Args(&mapping, &detector) {
+		case "mapping":
+			if !c.Args(&opts.Mapping) {
 				return opts, c.ArgErr()
 			}
 
-			if _, ok := mappings[mapping]; !ok {
-				return opts, c.Errf("unknown mapping %q", mapping)
+			if _, ok := mappings[opts.Mapping]; !ok {
+				return opts, c.Errf("unknown mapping %q", opts.Mapping)
+			}
+		case "detector":
+			var detector string
+			if !c.Args(&detector) {
+				return opts, c.ArgErr()
 			}
 
 			tuple := strings.SplitN(detector, ":", 2)
@@ -45,7 +51,6 @@ func parseOptions(c *caddy.Controller) (opts Options, err error) {
 				return opts, c.Errf("unknown detector name %q", detector)
 			}
 
-			opts.Mapping = mapping
 			opts.Model, opts.Version = tuple[0], tuple[1]
 		default:
 			return opts, c.Errf("unknown property %q", c.Val())

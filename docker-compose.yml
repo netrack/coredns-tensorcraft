@@ -1,0 +1,9 @@
+version: "3.3"
+services:
+  coredns.local:
+    build: .
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+  tensorflow.local:
+    image: "dnscnn:latest"
